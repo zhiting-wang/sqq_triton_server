@@ -67,18 +67,17 @@ async def batch_count(request: dict):
         version = request.get("model", '')  
         max_batch_size = 32  # 与Triton配置保持一致  
 
-        # # 批量下载和处理图像  
-        # tensors = []  
-        # for img_url in images[:max_batch_size]:  # 防止超过最大batch  
-        #     img = await download_image(img_url)  # 下载图像  
-        #     tensor = await process_image(img, version)  # 处理并转换为张量  
-        #     tensors.append(tensor)  
         # 使用asyncio.gather并行下载和处理图像  
         download_tasks = [download_image(url) for url in images[:max_batch_size]]  
         downloaded_images = await asyncio.gather(*download_tasks)  
 
         # 过滤有效图像  
         valid_images = [img for img in downloaded_images if img is not None]  
+        valid_urls = []  
+        for i, img in enumerate(downloaded_images):  
+            if img is not None:  
+                valid_images.append(img)  
+                valid_urls.append(images[i])  
 
         if not valid_images:  
             raise HTTPException(status_code=400, detail="No valid images provided")  
@@ -99,10 +98,11 @@ async def batch_count(request: dict):
         result = triton_client.infer(model_name="fcn_model", inputs=inputs)  
         outputs = result.as_numpy("output__0")  
         
-        # 后处理  
+        # 修改后处理，返回包含ball和image的字典  
         return [{  
-            "ball": max(0, min(int(round(o.item())), 16))  # 保持原有逻辑  
-        } for o in outputs]  
+            "ball": max(0, min(int(round(o.item())), 16)),  # 保持原有逻辑  
+            "image": url  # 添加对应的图像URL  
+        } for o, url in zip(outputs, valid_urls)]  
         
     except ValueError as ve:  
         raise HTTPException(status_code=400, detail=str(ve))  
