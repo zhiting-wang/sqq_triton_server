@@ -48,7 +48,7 @@ async def download_image(url: str) -> Image.Image:
             img = Image.open(BytesIO(response.content)).convert("RGB")  # 转换为RGB格式  
             return img  
     except Exception as e:  
-        print(f"下载失败: {e}")  
+        print(f"下载失败: {e}, URL: {url}")  
         # 处理下载失败的情况，返回默认图像  
         default_path = './16.jpg'  # 默认图像路径  
         return Image.open(default_path)  
