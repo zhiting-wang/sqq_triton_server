@@ -7,6 +7,8 @@ import torch
 from tritonclient.http import InferenceServerClient, InferInput  
 import httpx
 import asyncio
+import time
+from collections import deque
 
 app = FastAPI()  
 TRITON_URL = "localhost:8000"  
@@ -42,11 +44,18 @@ async def process_image(img: Image.Image, version: str) -> torch.Tensor:
 async def download_image(url: str) -> Image.Image:  
     """异步下载图像并返回PIL格式的图像对象."""  
     try:  
-        async with httpx.AsyncClient() as client:  
-            response = await client.get(url)  
-            response.raise_for_status()  # 若请求出错则抛出异常  
-            img = Image.open(BytesIO(response.content)).convert("RGB")  # 转换为RGB格式  
-            return img  
+        async with httpx.AsyncClient(timeout=8.0) as client:  
+            try:
+                response = await client.get(url)  
+                response.raise_for_status()  # 若请求出错则抛出异常  
+                img = Image.open(BytesIO(response.content)).convert("RGB")  # 转换为RGB格式  
+                return img  
+            except httpx.TimeoutException as timeout_error:
+                print(f"下载超时: {url}, 错误: {timeout_error}")
+                # 超时错误处理
+                default_path = './16.jpg'  # 默认图像路径
+                print(f"使用默认图像替代: {default_path}")
+                return Image.open(default_path)
     except Exception as e:  
         print(f"下载失败: {e}, URL: {url}")  
         # 处理下载失败的情况，返回默认图像  
@@ -61,28 +70,37 @@ async def root():
 
 @app.post("/batch_count")  
 async def batch_count(request: dict):  
+    # 记录开始时间  
+    start_time = time.time()  
     try:  
         # 解析请求体  
         images = request.get("images", [])  
         version = request.get("model", '')  
-        max_batch_size = 32  # 与Triton配置保持一致  
+        max_batch_size = 16  # 与Triton配置保持一致 
+
+        print(f"收到请求，包含 {len(images)} 张图像，模型版本: {version}")  
 
         # 使用asyncio.gather并行下载和处理图像  
         download_tasks = [download_image(url) for url in images[:max_batch_size]]  
         downloaded_images = await asyncio.gather(*download_tasks)  
 
+        print(f"已下载 {len(downloaded_images)} 张图像")
+
         # 过滤有效图像  
-        valid_images = [img for img in downloaded_images if img is not None]  
+        valid_images = []
         valid_urls = []  
         for i, img in enumerate(downloaded_images):  
             if img is not None:  
                 valid_images.append(img)  
                 valid_urls.append(images[i])  
 
+        print(f"有效图像数量: {len(valid_images)}")
+
         if not valid_images:  
             raise HTTPException(status_code=400, detail="No valid images provided")  
 
         # 并行处理图像  
+        print("开始处理图像...")
         process_tasks = [process_image(img, version) for img in valid_images]  
         tensors = await asyncio.gather(*process_tasks)  
             
@@ -90,13 +108,27 @@ async def batch_count(request: dict):
         batch_tensor = torch.stack(tensors).to(device)  
         
         # Triton客户端请求  
-        triton_client = InferenceServerClient(url=TRITON_URL)  
+        triton_client = InferenceServerClient(
+            url=TRITON_URL,
+            concurrency=4,  # 并发请求数
+            connection_timeout=10.0,  # 连接超时
+            network_timeout=60.0  # 网络超时
+            )  
         inputs = [InferInput("input__0", batch_tensor.shape, "FP32")]  
         inputs[0].set_data_from_numpy(batch_tensor.cpu().numpy())  
         
         # 执行推理  
+        print("开始执行推理...")
         result = triton_client.infer(model_name="fcn_model", inputs=inputs)  
         outputs = result.as_numpy("output__0")  
+        print(f"推理完成，获得 {len(outputs)} 个结果")
+
+        # 计算处理时间并记录
+        end_time = time.time()
+        processing_time = end_time - start_time
+        # 打印单次接口处理耗时
+        print(f"接口调用完成，耗时: {processing_time:.3f}秒, ")
+
         
         # 修改后处理，返回包含ball和image的字典  
         return [{  
